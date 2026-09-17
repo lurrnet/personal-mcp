@@ -11,7 +11,35 @@ from config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-mcp = FastMCP("Personal MCP Gateway")
+
+if settings.public_host:
+    security = TransportSecuritySettings(
+        allowed_hosts=[
+            settings.public_host,
+            f"{settings.public_host}:*",
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+        ],
+        allowed_origins=[
+            f"https://{settings.public_host}",
+            f"https://{settings.public_host}:*",
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+        ],
+    )
+else:
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+# In MCP Python SDK v1.x, transport_security belongs on the FastMCP
+# constructor. streamable_http_app() does not accept that keyword.
+mcp = FastMCP(
+    "Personal MCP Gateway",
+    host=settings.host,
+    port=settings.port,
+    transport_security=security,
+)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -19,7 +47,7 @@ async def gateway_status() -> dict[str, Any]:
     """Return enabled integrations and gateway capabilities without exposing secrets."""
     return {
         "service": "personal-mcp",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "integrations": sorted(settings.integrations),
         "authMode": settings.auth_mode,
         "auditLogging": settings.audit_log,
@@ -120,21 +148,7 @@ if "trilium" in settings.integrations:
             raise
 
 
-if settings.public_host:
-    security = TransportSecuritySettings(
-        allowed_hosts=[
-            settings.public_host,
-            f"{settings.public_host}:*",
-            "localhost",
-            "localhost:*",
-            "127.0.0.1",
-            "127.0.0.1:*",
-        ]
-    )
-else:
-    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-
-mcp_app = mcp.streamable_http_app(transport_security=security)
+mcp_app = mcp.streamable_http_app()
 app = MCPAuthMiddleware(mcp_app)
 
 
