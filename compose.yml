@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - ./config:/config:ro
     ports:
       - "127.0.0.1:8765:8765"
     security_opt:
