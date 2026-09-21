@@ -1,6 +1,6 @@
 import os
 from collections import deque
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -9,7 +9,15 @@ class TriliumError(RuntimeError):
     pass
 
 
-class WriteScopeError(PermissionError):
+class AccessScopeError(PermissionError):
+    pass
+
+
+class WriteScopeError(AccessScopeError):
+    pass
+
+
+class ReadScopeError(AccessScopeError):
     pass
 
 
@@ -17,6 +25,8 @@ class TriliumClient:
     def __init__(self) -> None:
         self.base_url = os.environ["TRILIUM_ETAPI_URL"].rstrip("/")
         self.token = os.environ["TRILIUM_ETAPI_TOKEN"]
+        # Optional global hard ceiling for writes. Per-client ACLs are checked
+        # separately and cannot bypass this root when it is configured.
         self.write_root = os.getenv("TRILIUM_WRITE_ROOT_NOTE_ID", "").strip()
 
     def _headers(self) -> dict[str, str]:
@@ -93,16 +103,50 @@ class TriliumClient:
                     queue.append(parent_id)
         return False
 
-    async def assert_write_allowed(self, note_id: str) -> None:
-        if not self.write_root:
-            raise WriteScopeError(
-                "Trilium writes are disabled because TRILIUM_WRITE_ROOT_NOTE_ID "
-                "is not configured."
+    async def is_within_roots(self, note_id: str, roots: Iterable[str]) -> bool:
+        roots_tuple = tuple(roots)
+        if "*" in roots_tuple:
+            return True
+        for root in roots_tuple:
+            if await self.is_descendant_or_self(note_id, root):
+                return True
+        return False
+
+    async def assert_read_allowed(self, note_id: str, roots: Iterable[str]) -> None:
+        if not await self.is_within_roots(note_id, roots):
+            raise ReadScopeError(
+                f"Read blocked: note {note_id!r} is outside this client's Trilium read roots."
             )
+
+    async def assert_client_write_allowed(
+        self, note_id: str, roots: Iterable[str]
+    ) -> None:
+        if not await self.is_within_roots(note_id, roots):
+            raise WriteScopeError(
+                f"Write blocked: note {note_id!r} is outside this client's Trilium write roots."
+            )
+
+    async def assert_global_write_allowed(self, note_id: str) -> None:
+        if not self.write_root:
+            return
         if not await self.is_descendant_or_self(note_id, self.write_root):
             raise WriteScopeError(
-                f"Write blocked: note {note_id!r} is outside the configured Trilium write root."
+                f"Write blocked: note {note_id!r} is outside the global Trilium write root."
             )
+
+    async def filter_search_results(
+        self, results: list[dict[str, Any]], roots: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        roots_tuple = tuple(roots)
+        if "*" in roots_tuple:
+            return results
+
+        allowed: list[dict[str, Any]] = []
+        for item in results:
+            note_id = item.get("noteId")
+            if note_id and await self.is_within_roots(str(note_id), roots_tuple):
+                allowed.append(item)
+        return allowed
 
     async def create_note(
         self,
@@ -111,7 +155,7 @@ class TriliumClient:
         content: str,
         note_type: str = "text",
     ) -> dict[str, Any]:
-        await self.assert_write_allowed(parent_note_id)
+        await self.assert_global_write_allowed(parent_note_id)
         payload = {
             "parentNoteId": parent_note_id,
             "title": title,
@@ -126,7 +170,7 @@ class TriliumClient:
         title: str | None = None,
         content: str | None = None,
     ) -> dict[str, Any]:
-        await self.assert_write_allowed(note_id)
+        await self.assert_global_write_allowed(note_id)
         if title is None and content is None:
             raise ValueError("At least one of title or content must be provided")
 
