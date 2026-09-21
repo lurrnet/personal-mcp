@@ -1,4 +1,4 @@
-# Personal MCP Gateway v0.3
+# Personal MCP Gateway v0.4
 
 A security-first MCP gateway for exposing a small, controlled set of tools from personal services to ChatGPT or other MCP clients.
 
@@ -249,3 +249,81 @@ personal-mcp/
             ├── __init__.py
             └── client.py
 ```
+
+
+## v0.4 multi-client authentication and ACLs
+
+v0.4 adds one static bearer token per client plus per-client ACLs. Do not reuse the same token across ChatGPT, OpenClaw, automations, or other services.
+
+### Create client tokens
+
+Generate one random token per client:
+
+```bash
+openssl rand -hex 32
+```
+
+For each token, calculate its SHA-256 digest:
+
+```bash
+printf '%s' 'PASTE_RAW_TOKEN_HERE' | sha256sum
+```
+
+Only the digest goes into `config/clients.json`. The raw token is configured only in the client that uses it.
+
+Create the live ACL file:
+
+```bash
+mkdir -p config
+cp config/clients.example.json config/clients.json
+chmod 600 config/clients.json
+nano config/clients.json
+```
+
+`config/clients.json` is gitignored.
+
+Example policy semantics:
+
+- `allowed_tools`: exact MCP tools the client may invoke. `"*"` means all registered tools.
+- `trilium.read_roots`: Trilium note roots the client may read. `"*"` means all notes visible to the ETAPI token.
+- `trilium.write_roots`: Trilium note roots the client may create/update within. An empty list disables writes.
+- `TRILIUM_WRITE_ROOT_NOTE_ID`: optional global write ceiling that applies in addition to every per-client write ACL.
+
+Recommended example:
+
+```text
+ChatGPT
+  read  -> all Trilium
+  write -> AI Workspace
+
+OpenClaw
+  read  -> Projects subtree
+  write -> disabled
+```
+
+Set:
+
+```env
+MCP_AUTH_MODE=multi_bearer
+MCP_CLIENTS_FILE=/config/clients.json
+```
+
+Then rebuild and restart:
+
+```bash
+git pull
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+docker compose logs --tail=100 personal-mcp
+```
+
+When ChatGPT connects, use the raw token generated specifically for the `chatgpt` client. OpenClaw must use its own raw token.
+
+Audit events now include the authenticated client identity:
+
+```json
+{"client":"chatgpt","tool":"trilium_search_notes","action":"read","ok":true}
+```
+
+If a client calls a tool not listed in its ACL, or attempts to access a Trilium note outside its allowed roots, the request is rejected.
