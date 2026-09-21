@@ -6,7 +6,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from audit import record
-from auth import MCPAuthMiddleware
+from auth import (
+    MCPAuthMiddleware,
+    get_client_name,
+    require_tool,
+    trilium_roots,
+)
 from config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -32,8 +37,6 @@ if settings.public_host:
 else:
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
-# In MCP Python SDK v1.x, transport_security belongs on the FastMCP
-# constructor. streamable_http_app() does not accept that keyword.
 mcp = FastMCP(
     "Personal MCP Gateway",
     host=settings.host,
@@ -44,13 +47,17 @@ mcp = FastMCP(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def gateway_status() -> dict[str, Any]:
-    """Return enabled integrations and gateway capabilities without exposing secrets."""
+    """Return gateway status for the authenticated client without exposing secrets."""
+    require_tool("gateway_status")
+    policy = settings.clients.get(get_client_name())
     return {
         "service": "personal-mcp",
-        "version": "0.3.1",
+        "version": "0.4.0",
+        "client": get_client_name(),
         "integrations": sorted(settings.integrations),
         "authMode": settings.auth_mode,
         "auditLogging": settings.audit_log,
+        "allowedTools": sorted(policy.allowed_tools) if policy else ["*"],
     }
 
 
@@ -62,6 +69,7 @@ if "trilium" in settings.integrations:
     @mcp.tool(annotations={"readOnlyHint": True})
     async def trilium_health_check() -> dict[str, Any]:
         """Check connectivity to Trilium ETAPI and return basic app information."""
+        require_tool("trilium_health_check")
         try:
             result = await trilium.app_info()
             record("trilium_health_check", "read", True)
@@ -72,10 +80,19 @@ if "trilium" in settings.integrations:
 
     @mcp.tool(annotations={"readOnlyHint": True})
     async def trilium_search_notes(query: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Search Trilium notes using a Trilium search expression or free-text query."""
+        """Search Trilium notes and return only results inside the client's read roots."""
+        require_tool("trilium_search_notes")
         try:
-            result = await trilium.search_notes(query, limit)
-            record("trilium_search_notes", "read", True, query_length=len(query), result_count=len(result))
+            raw = await trilium.search_notes(query, limit)
+            result = await trilium.filter_search_results(raw, trilium_roots("read"))
+            record(
+                "trilium_search_notes",
+                "read",
+                True,
+                query_length=len(query),
+                raw_result_count=len(raw),
+                result_count=len(result),
+            )
             return result
         except Exception:
             record("trilium_search_notes", "read", False, query_length=len(query))
@@ -83,8 +100,10 @@ if "trilium" in settings.integrations:
 
     @mcp.tool(annotations={"readOnlyHint": True})
     async def trilium_get_note(note_id: str) -> dict[str, Any]:
-        """Read a Trilium note's metadata and content by note ID."""
+        """Read a Trilium note by note ID if it is inside the client's read roots."""
+        require_tool("trilium_get_note")
         try:
+            await trilium.assert_read_allowed(note_id, trilium_roots("read"))
             result = await trilium.get_note(note_id)
             record("trilium_get_note", "read", True, note_id=note_id)
             return result
@@ -99,9 +118,15 @@ if "trilium" in settings.integrations:
         content: str,
         note_type: str = "text",
     ) -> dict[str, Any]:
-        """Create a Trilium child note inside the configured write-root subtree."""
+        """Create a Trilium child note inside the client's configured write roots."""
+        require_tool("trilium_create_note")
         try:
-            result = await trilium.create_note(parent_note_id, title, content, note_type)
+            await trilium.assert_client_write_allowed(
+                parent_note_id, trilium_roots("write")
+            )
+            result = await trilium.create_note(
+                parent_note_id, title, content, note_type
+            )
             record(
                 "trilium_create_note",
                 "write",
@@ -126,8 +151,12 @@ if "trilium" in settings.integrations:
         title: str | None = None,
         content: str | None = None,
     ) -> dict[str, Any]:
-        """Update a Trilium note inside the configured write-root subtree."""
+        """Update a Trilium note inside the client's configured write roots."""
+        require_tool("trilium_update_note")
         try:
+            await trilium.assert_client_write_allowed(
+                note_id, trilium_roots("write")
+            )
             result = await trilium.update_note(note_id, title, content)
             record(
                 "trilium_update_note",
