@@ -1,0 +1,31 @@
+{
+  "clients": {
+    "chatgpt": {
+      "token_sha256": "REPLACE_WITH_SHA256_OF_CHATGPT_TOKEN",
+      "allowed_tools": [
+        "gateway_status",
+        "trilium_health_check",
+        "trilium_search_notes",
+        "trilium_get_note",
+        "trilium_create_note",
+        "trilium_update_note"
+      ],
+      "trilium": {
+        "read_roots": ["*"],
+        "write_roots": ["REPLACE_WITH_AI_WORKSPACE_NOTE_ID"]
+      }
+    },
+    "openclaw": {
+      "token_sha256": "REPLACE_WITH_SHA256_OF_OPENCLAW_TOKEN",
+      "allowed_tools": [
+        "gateway_status",
+        "trilium_search_notes",
+        "trilium_get_note"
+      ],
+      "trilium": {
+        "read_roots": ["REPLACE_WITH_PROJECTS_NOTE_ID"],
+        "write_roots": []
+      }
+    }
+  }
+}
