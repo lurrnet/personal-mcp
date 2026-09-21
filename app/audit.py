@@ -16,8 +16,16 @@ def record(tool: str, action: str, ok: bool, **fields: Any) -> None:
     """
     if not settings.audit_log:
         return
+
+    try:
+        from auth import get_client_name
+        client = get_client_name()
+    except Exception:
+        client = "unknown"
+
     event = {
         "ts": datetime.now(timezone.utc).isoformat(),
+        "client": client,
         "tool": tool,
         "action": action,
         "ok": ok,
