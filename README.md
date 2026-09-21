@@ -276,11 +276,12 @@ Create the live ACL file:
 ```bash
 mkdir -p config
 cp config/clients.example.json config/clients.json
-chmod 600 config/clients.json
+chmod 755 config
+chmod 644 config/clients.json
 nano config/clients.json
 ```
 
-`config/clients.json` is gitignored.
+`config/clients.json` is gitignored. The container runs as UID `10001`, so a host-owned file with mode `600` cannot be read through the bind mount. Mode `644` is used here because this file contains only SHA-256 token digests and ACL metadata, not raw client tokens or backend API secrets. If you prefer stricter permissions, you can instead make the file readable by UID `10001` (for example by changing ownership) and keep a restrictive mode.
 
 Example policy semantics:
 
