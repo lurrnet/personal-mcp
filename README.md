@@ -1,100 +1,356 @@
 # Personal MCP Gateway v0.4
 
-A security-first MCP gateway for exposing a small, controlled set of tools from personal services to ChatGPT or other MCP clients.
+A security-first MCP gateway for exposing a small, controlled set of personal-service tools to ChatGPT, OpenClaw, automations, and other MCP clients.
 
-Trilium is the first integration. The project is intentionally structured so future integrations such as Nextcloud, Immich, Plex, OCI, Home Assistant, or custom APIs can be added without giving the MCP client their native API tokens.
+Trilium is the first integration. The gateway is designed so backend credentials stay on the server while each MCP client gets its own identity, token, tool permissions, and data-access scope.
+
+## What v0.4 adds
+
+v0.4 introduces **multi-client static bearer tokens + per-client ACLs**.
+
+Instead of every service sharing one MCP token, each client gets a separate token:
+
+```text
+ChatGPT   -> token A
+OpenClaw  -> token B
+Script    -> token C
+               |
+               v
+        Personal MCP Gateway
+               |
+               v
+           Trilium ETAPI
+```
+
+Each token maps to an ACL that controls:
+
+- which MCP tools the client may call;
+- which Trilium subtrees the client may read;
+- which Trilium subtrees the client may write;
+- the client name recorded in the audit log.
+
+A leaked or revoked token therefore affects only that client.
 
 ## Architecture
 
 ```text
-ChatGPT / OpenClaw / MCP client
-            |
-            | HTTPS + MCP authentication
-            v
-      Personal MCP Gateway
-      |        |        |
-      |        |        +--> future: OCI / Plex / ...
-      |        +-----------> future: Nextcloud / Immich
-      +--------------------> Trilium ETAPI
+ChatGPT / OpenClaw / automation / MCP client
+                    |
+                    | HTTPS
+                    | Authorization: Bearer <client-specific-token>
+                    v
+             Personal MCP Gateway
+                    |
+                    | per-client ACL
+                    |
+             +------+------+
+             |             |
+             v             v
+        Trilium ETAPI   future integrations
+                        Nextcloud / Immich /
+                        Plex / OCI / ...
 ```
 
-Each backend credential remains server-side. The MCP client sees only the tools you choose to expose.
+Backend credentials such as `TRILIUM_ETAPI_TOKEN` remain on the MCP server and are never given to ChatGPT or other MCP clients.
 
-## v0.3 security model
+## Security model
 
-- Docker publishes only to `127.0.0.1:8765`.
-- Public ingress is expected to be a secure tunnel/reverse proxy.
-- `/mcp` uses Bearer authentication by default.
-- Backend credentials stay in `.env` on the server.
-- Trilium writes are restricted to one configured subtree.
-- There is no delete tool.
-- Read/write intent is exposed with MCP tool annotations.
-- Tool calls are audit-logged as JSON without note contents or secrets.
-- Container runs as an unprivileged user, drops Linux capabilities, and has a read-only filesystem.
+v0.4 uses several layers of protection:
 
-Do not treat the MCP hostname as secret.
+- Docker publishes MCP only on `127.0.0.1:8765`.
+- Public access is expected through a secure tunnel or reverse proxy such as Cloudflare Tunnel.
+- `/mcp` uses bearer authentication.
+- Recommended auth mode is `multi_bearer`.
+- Every client has its own static token.
+- Only SHA-256 token digests are stored in `config/clients.json`.
+- Per-client ACLs control tool access and Trilium read/write roots.
+- `TRILIUM_WRITE_ROOT_NOTE_ID` is an optional global write ceiling.
+- There is intentionally no delete tool.
+- Backend API credentials remain server-side in `.env`.
+- Audit logs contain client identity and operation metadata, but not note contents or secrets.
+- The container runs as an unprivileged user, drops Linux capabilities, and uses a read-only filesystem.
 
-## Current tools
+Do not treat the MCP hostname itself as a secret.
 
-| Tool | Class | Scope |
+## Current MCP tools
+
+| Tool | Type | Purpose |
 |---|---|---|
-| `gateway_status` | READ | Gateway metadata only |
-| `trilium_health_check` | READ | Trilium app info |
-| `trilium_search_notes` | READ | Notes visible to ETAPI token |
-| `trilium_get_note` | READ | Notes visible to ETAPI token |
-| `trilium_create_note` | WRITE | Configured Trilium write subtree |
-| `trilium_update_note` | WRITE | Configured Trilium write subtree |
+| `gateway_status` | READ | Gateway version, client identity, and enabled integrations |
+| `trilium_health_check` | READ | Test Trilium ETAPI connectivity |
+| `trilium_search_notes` | READ | Search notes within the client's permitted read scope |
+| `trilium_get_note` | READ | Read a note within the client's permitted read scope |
+| `trilium_create_note` | WRITE | Create a child note within an allowed write root |
+| `trilium_update_note` | WRITE | Update a note within an allowed write root |
 
-There is intentionally no delete tool.
+There is intentionally no Trilium delete tool.
 
-## 1. Create a Trilium AI Workspace
+---
 
-Create a note such as:
-
-```text
-AI Workspace
-├── Inbox
-├── Travel
-├── Research
-└── Drafts
-```
-
-Copy the `noteId` for `AI Workspace`. Trilium writes will be rejected unless the target is this note or a descendant.
-
-## 2. Configure
+## 1. Clone and prepare
 
 ```bash
+git clone https://github.com/lurrnet/personal-mcp.git
+cd personal-mcp
 cp .env.example .env
 chmod 600 .env
-openssl rand -hex 32
+```
+
+Edit the server-side configuration:
+
+```bash
 nano .env
 ```
 
-Example:
+Recommended v0.4 configuration:
 
 ```env
 MCP_PUBLIC_HOST=mcp.example.com
-MCP_AUTH_MODE=bearer
-MCP_API_TOKEN=<64-hex-random-secret>
+MCP_HOST=0.0.0.0
+MCP_PORT=8765
+
+MCP_AUTH_MODE=multi_bearer
+MCP_CLIENTS_FILE=/config/clients.json
+
 MCP_INTEGRATIONS=trilium
 MCP_AUDIT_LOG=true
 
 TRILIUM_ETAPI_URL=https://notes.example.com/etapi
 TRILIUM_ETAPI_TOKEN=<dedicated-etapi-token>
-TRILIUM_WRITE_ROOT_NOTE_ID=<AI-Workspace-noteId>
+
+# Optional global ceiling. Leave blank when different clients need
+# unrelated Trilium write roots.
+TRILIUM_WRITE_ROOT_NOTE_ID=
 ```
 
 Never commit `.env`.
 
-## 3. Start
+### About `TRILIUM_WRITE_ROOT_NOTE_ID`
+
+In v0.4, normal write authorization should usually be defined by each client's `write_roots`.
+
+If all clients must remain under one common Trilium subtree, you can additionally set:
+
+```env
+TRILIUM_WRITE_ROOT_NOTE_ID=<common-parent-note-id>
+```
+
+That becomes a second, global write boundary.
+
+If different clients need unrelated roots, leave it blank:
+
+```env
+TRILIUM_WRITE_ROOT_NOTE_ID=
+```
+
+The per-client ACLs will then define the write boundaries.
+
+---
+
+## 2. Create a token for each client
+
+Do **not** reuse the same token for ChatGPT, OpenClaw, scripts, or other services.
+
+Generate one random token per client:
+
+```bash
+openssl rand -hex 32
+```
+
+For example, generate separate raw tokens for:
+
+```text
+chatgpt
+openclaw
+automation
+```
+
+Keep each raw token private. It is entered only into the corresponding MCP client.
+
+For each raw token, calculate its SHA-256 digest:
+
+```bash
+printf '%s' 'PASTE_RAW_TOKEN_HERE' | sha256sum
+```
+
+On macOS, either of these also works:
+
+```bash
+printf '%s' 'PASTE_RAW_TOKEN_HERE' | shasum -a 256
+```
+
+Only the resulting 64-character SHA-256 digest goes into `config/clients.json`.
+
+---
+
+## 3. Configure per-client ACLs
+
+Create the live ACL file:
+
+```bash
+mkdir -p config
+cp config/clients.example.json config/clients.json
+chmod 755 config
+chmod 644 config/clients.json
+nano config/clients.json
+```
+
+`config/clients.json` is gitignored.
+
+The container runs as UID `10001`. Because `./config` is bind-mounted read-only into the container, a host-owned `clients.json` with mode `600` would normally be unreadable by that UID. The documented `644` mode allows the container to read the file.
+
+The file contains token hashes and ACL metadata, not raw client tokens or backend API credentials. If you want stricter host permissions, make the file readable by UID `10001` through ownership/group permissions instead.
+
+Example:
+
+```json
+{
+  "clients": {
+    "chatgpt": {
+      "token_sha256": "SHA256_OF_CHATGPT_RAW_TOKEN",
+      "allowed_tools": [
+        "gateway_status",
+        "trilium_health_check",
+        "trilium_search_notes",
+        "trilium_get_note",
+        "trilium_create_note",
+        "trilium_update_note"
+      ],
+      "trilium": {
+        "read_roots": ["*"],
+        "write_roots": ["AI_WORKSPACE_NOTE_ID"]
+      }
+    },
+    "openclaw": {
+      "token_sha256": "SHA256_OF_OPENCLAW_RAW_TOKEN",
+      "allowed_tools": [
+        "gateway_status",
+        "trilium_search_notes",
+        "trilium_get_note"
+      ],
+      "trilium": {
+        "read_roots": ["PROJECTS_NOTE_ID"],
+        "write_roots": []
+      }
+    }
+  }
+}
+```
+
+### ACL fields
+
+`allowed_tools`
+
+Defines the exact MCP tools that client may invoke.
+
+Example:
+
+```json
+"allowed_tools": [
+  "trilium_search_notes",
+  "trilium_get_note"
+]
+```
+
+Use:
+
+```json
+"allowed_tools": ["*"]
+```
+
+only if that client should be able to invoke every registered MCP tool.
+
+`trilium.read_roots`
+
+Defines the Trilium roots the client may read.
+
+Read the entire Trilium account visible to the ETAPI token:
+
+```json
+"read_roots": ["*"]
+```
+
+Restrict reads to one or more subtrees:
+
+```json
+"read_roots": [
+  "PROJECTS_NOTE_ID",
+  "RESEARCH_NOTE_ID"
+]
+```
+
+`trilium.write_roots`
+
+Defines where the client may create or update notes:
+
+```json
+"write_roots": ["AI_WORKSPACE_NOTE_ID"]
+```
+
+Disable writes completely:
+
+```json
+"write_roots": []
+```
+
+Multiple independent write roots are supported:
+
+```json
+"write_roots": [
+  "OPENCLAW_NOTE_ID",
+  "AUTOMATION_INBOX_NOTE_ID"
+]
+```
+
+---
+
+## 4. Recommended client policies
+
+A practical setup is:
+
+```text
+ChatGPT
+  READ  -> all Trilium
+  WRITE -> ChatGPT / AI Workspace
+  TOOLS -> search, get, create, update
+
+OpenClaw
+  READ  -> selected OpenClaw / Projects subtrees
+  WRITE -> OpenClaw Workspace
+  TOOLS -> only what OpenClaw needs
+
+Automation
+  READ  -> Inbox or selected source notes
+  WRITE -> Automation Inbox
+  TOOLS -> minimum required set
+```
+
+The important rule is **one identity, one token, one ACL per service**.
+
+---
+
+## 5. Start the gateway
+
+Build and start:
 
 ```bash
 docker compose build
 docker compose up -d
+```
+
+Check the logs:
+
+```bash
+docker compose logs --tail=100 personal-mcp
+```
+
+Follow logs continuously:
+
+```bash
 docker compose logs -f personal-mcp
 ```
 
-Verify loopback-only publishing:
+Verify that Docker publishes only on loopback:
 
 ```bash
 ss -lntp | grep 8765
@@ -106,75 +362,153 @@ Expected:
 127.0.0.1:8765
 ```
 
-Do not open port 8765 in OCI Security Lists / NSGs.
+Do not expose port `8765` directly through OCI Security Lists or NSGs when using a tunnel/reverse proxy.
 
-## 4. Cloudflare Tunnel
+---
 
-Point a public hostname to the local service:
+## 6. Cloudflare Tunnel
+
+Point the public MCP hostname to the local service:
 
 ```text
 mcp.example.com -> http://localhost:8765
 ```
 
-The MCP URL is then:
+The MCP endpoint is then:
 
 ```text
 https://mcp.example.com/mcp
 ```
 
-With `MCP_AUTH_MODE=bearer`, requests without the gateway token should receive HTTP 401.
+The public hostname can be reachable from the internet; authorization is enforced by the MCP bearer token.
 
-## 5. Test authentication
+---
 
-Without token:
+## 7. Test authentication
+
+Without a token:
 
 ```bash
 curl -i https://mcp.example.com/mcp
 ```
 
-Expected: `401 Unauthorized`.
+Expected:
 
-With token:
+```text
+401 Unauthorized
+```
+
+With one client's raw token:
 
 ```bash
 curl -i \
-  -H "Authorization: Bearer $MCP_API_TOKEN" \
+  -H "Authorization: Bearer YOUR_CLIENT_RAW_TOKEN" \
   https://mcp.example.com/mcp
 ```
 
-This should get past the gateway auth layer. A bare GET is not a complete MCP protocol exchange, so the final response need not be a normal web page.
+This should pass the authentication layer.
 
-## 6. Connect ChatGPT
+A simple GET request is not a complete MCP protocol exchange, so the final response does not need to look like a normal web page. The important distinction is that a valid token should not receive the gateway's `401 Unauthorized` response.
 
-In ChatGPT's custom MCP app dialog:
+Test an invalid token as well:
 
-- Name: `Personal MCP`
-- Connection: `Server URL`
-- URL: `https://mcp.example.com/mcp`
-- Authentication: `Access token / API key`
-- Token: the value of `MCP_API_TOKEN`
-
-Do **not** enter `TRILIUM_ETAPI_TOKEN` into ChatGPT.
-
-After tool scanning succeeds, test in this order:
-
-1. `gateway_status`
-2. `trilium_health_check`
-3. Search for a harmless note
-4. Read the note
-5. Create a test note under `AI Workspace`
-6. Update that test note
-7. Attempt a write outside `AI Workspace` and confirm it is rejected
-
-## 7. Audit log
-
-The server writes compact JSON events to stdout, for example:
-
-```json
-{"ts":"...","tool":"trilium_search_notes","action":"read","ok":true,"query_length":8,"result_count":2}
+```bash
+curl -i \
+  -H "Authorization: Bearer wrong-token" \
+  https://mcp.example.com/mcp
 ```
 
-It intentionally does not log note content, ETAPI tokens, MCP tokens, or Authorization headers.
+Expected:
+
+```text
+401 Unauthorized
+```
+
+---
+
+## 8. Connect ChatGPT
+
+Create or edit the custom MCP app in ChatGPT:
+
+```text
+Name:           Personal MCP
+Connection:     Server URL
+Server URL:     https://mcp.example.com/mcp
+Authentication: Access token / API key
+Token:          <ChatGPT's raw client token>
+```
+
+Use the **raw token generated specifically for the `chatgpt` client**.
+
+Do not enter any of these into ChatGPT:
+
+- `TRILIUM_ETAPI_TOKEN`;
+- another service's MCP token;
+- the SHA-256 digest from `clients.json`.
+
+After connecting, a useful verification sequence is:
+
+1. call `gateway_status` and confirm `client=chatgpt`;
+2. call `trilium_health_check`;
+3. search for a harmless note;
+4. read the note;
+5. create a test note inside an allowed write root;
+6. update that note;
+7. attempt a write outside the allowed root and confirm that it is rejected.
+
+---
+
+## 9. Connect additional MCP clients
+
+For OpenClaw or another service:
+
+1. generate a new raw token;
+2. calculate its SHA-256 digest;
+3. add a new entry to `config/clients.json`;
+4. define the minimum required `allowed_tools`, `read_roots`, and `write_roots`;
+5. restart the gateway if the configuration has changed;
+6. configure that service with its own raw token.
+
+Do not copy ChatGPT's raw token into another service.
+
+---
+
+## 10. Audit log
+
+Audit events include the authenticated client identity.
+
+Example:
+
+```json
+{
+  "ts": "2026-10-06T12:00:00+00:00",
+  "client": "chatgpt",
+  "tool": "trilium_search_notes",
+  "action": "read",
+  "ok": true,
+  "query_length": 8,
+  "result_count": 2
+}
+```
+
+Another client would appear separately:
+
+```json
+{
+  "client": "openclaw",
+  "tool": "trilium_get_note",
+  "action": "read",
+  "ok": true
+}
+```
+
+The audit logger intentionally does not record:
+
+- raw MCP tokens;
+- token hashes;
+- Trilium ETAPI tokens;
+- Authorization headers;
+- note contents.
 
 View logs with:
 
@@ -182,53 +516,76 @@ View logs with:
 docker compose logs -f personal-mcp
 ```
 
-## 8. Adding another integration later
+---
 
-Use one module per backend under:
+## 11. How authorization works
 
-```text
-app/integrations/
-```
-
-Recommended pattern:
+For `MCP_AUTH_MODE=multi_bearer`, each request follows this flow:
 
 ```text
-app/integrations/
-├── trilium/
-│   ├── __init__.py
-│   └── client.py
-├── nextcloud/
-│   └── client.py
-├── immich/
-│   └── client.py
-└── oci/
-    └── client.py
+Authorization: Bearer <raw token>
+        |
+        v
+SHA-256(raw token)
+        |
+        v
+match token_sha256 in clients.json
+        |
+        v
+identify client
+        |
+        +--> allowed_tools check
+        |
+        +--> Trilium read_roots / write_roots check
+        |
+        +--> optional global TRILIUM_WRITE_ROOT_NOTE_ID check
+        |
+        v
+execute tool
 ```
 
-Keep these rules:
+A request is rejected if:
 
-1. Each backend token is read only from server-side environment variables or a secret manager.
-2. Expose narrow MCP tools rather than raw passthrough HTTP endpoints.
-3. Prefix tool names by integration, e.g. `nextcloud_read_file`.
-4. Separate read tools from write tools using MCP annotations.
-5. Put destructive operations behind a separate, stricter policy or omit them entirely.
-6. Never log secrets or full private payloads in audit logs.
+- the bearer token is missing or invalid;
+- the client is not permitted to invoke that tool;
+- the target note is outside the client's read roots;
+- the target note is outside the client's write roots;
+- a global write root is configured and the target falls outside it.
 
-To enable another integration, add its module and include its name in `MCP_INTEGRATIONS`.
+---
 
-## 9. Recommended future evolution
+## 12. Updating v0.4
 
-For a larger gateway, move from a single shared bearer token to per-client OAuth or an authenticated private tunnel. Also consider:
+Pull the latest code:
 
-- per-client permissions
-- rate limits
-- immutable audit storage
-- explicit approval for dangerous actions
-- backend-specific read scopes
-- secret manager instead of `.env`
-- a policy file mapping clients to tools
+```bash
+cd ~/github/personal-mcp
+git pull
+```
 
-## Project layout
+If application code, the Dockerfile, or dependencies changed:
+
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+If only `config/clients.json` or `.env` changed, restarting is usually sufficient:
+
+```bash
+docker compose restart personal-mcp
+```
+
+Then verify:
+
+```bash
+docker compose logs --tail=100 personal-mcp
+```
+
+---
+
+## 13. Project layout
 
 ```text
 personal-mcp/
@@ -236,6 +593,9 @@ personal-mcp/
 ├── compose.yml
 ├── .env.example
 ├── .gitignore
+├── config/
+│   ├── clients.example.json
+│   └── clients.json          # local only, gitignored
 └── app/
     ├── Dockerfile
     ├── requirements.txt
@@ -250,81 +610,67 @@ personal-mcp/
             └── client.py
 ```
 
+---
 
-## v0.4 multi-client authentication and ACLs
+## 14. Adding another integration
 
-v0.4 adds one static bearer token per client plus per-client ACLs. Do not reuse the same token across ChatGPT, OpenClaw, automations, or other services.
-
-### Create client tokens
-
-Generate one random token per client:
-
-```bash
-openssl rand -hex 32
-```
-
-For each token, calculate its SHA-256 digest:
-
-```bash
-printf '%s' 'PASTE_RAW_TOKEN_HERE' | sha256sum
-```
-
-Only the digest goes into `config/clients.json`. The raw token is configured only in the client that uses it.
-
-Create the live ACL file:
-
-```bash
-mkdir -p config
-cp config/clients.example.json config/clients.json
-chmod 755 config
-chmod 644 config/clients.json
-nano config/clients.json
-```
-
-`config/clients.json` is gitignored. The container runs as UID `10001`, so a host-owned file with mode `600` cannot be read through the bind mount. Mode `644` is used here because this file contains only SHA-256 token digests and ACL metadata, not raw client tokens or backend API secrets. If you prefer stricter permissions, you can instead make the file readable by UID `10001` (for example by changing ownership) and keep a restrictive mode.
-
-Example policy semantics:
-
-- `allowed_tools`: exact MCP tools the client may invoke. `"*"` means all registered tools.
-- `trilium.read_roots`: Trilium note roots the client may read. `"*"` means all notes visible to the ETAPI token.
-- `trilium.write_roots`: Trilium note roots the client may create/update within. An empty list disables writes.
-- `TRILIUM_WRITE_ROOT_NOTE_ID`: optional global write ceiling that applies in addition to every per-client write ACL.
-
-Recommended example:
+Add one module per backend under:
 
 ```text
-ChatGPT
-  read  -> all Trilium
-  write -> AI Workspace
-
-OpenClaw
-  read  -> Projects subtree
-  write -> disabled
+app/integrations/
 ```
 
-Set:
+For example:
+
+```text
+app/integrations/
+├── trilium/
+├── nextcloud/
+├── immich/
+└── oci/
+```
+
+Keep the same security principles:
+
+1. backend credentials stay server-side;
+2. expose narrow MCP tools rather than raw passthrough HTTP endpoints;
+3. prefix tools by integration, such as `nextcloud_read_file`;
+4. give every client only the tools and resources it actually needs;
+5. avoid destructive tools unless there is a clear authorization model;
+6. never log secrets or private payload contents.
+
+---
+
+## Legacy single-token mode
+
+v0.4 still contains compatibility support for:
+
+```env
+MCP_AUTH_MODE=bearer
+MCP_API_TOKEN=<single-shared-token>
+```
+
+This mode gives every holder of that token the same MCP identity and does not provide the v0.4 per-client ACL model.
+
+It is retained for compatibility only. New deployments should use:
 
 ```env
 MCP_AUTH_MODE=multi_bearer
 MCP_CLIENTS_FILE=/config/clients.json
 ```
 
-Then rebuild and restart:
+---
 
-```bash
-git pull
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-docker compose logs --tail=100 personal-mcp
-```
+## Future improvements
 
-When ChatGPT connects, use the raw token generated specifically for the `chatgpt` client. OpenClaw must use its own raw token.
+Possible future upgrades include:
 
-Audit events now include the authenticated client identity:
+- OAuth or JWT-based client identity;
+- token rotation and expiration;
+- rate limits per client;
+- immutable or remote audit storage;
+- approval workflows for destructive operations;
+- additional backend integrations;
+- a secret manager instead of environment-file secrets.
 
-```json
-{"client":"chatgpt","tool":"trilium_search_notes","action":"read","ok":true}
-```
-
-If a client calls a tool not listed in its ACL, or attempts to access a Trilium note outside its allowed roots, the request is rejected.
+For the current personal/private deployment model, **multi-client static tokens + per-client ACLs** provide a practical balance between simplicity, isolation, and auditability.
