@@ -458,7 +458,151 @@ After connecting, a useful verification sequence is:
 
 ---
 
-## 9. Connect additional MCP clients
+## 9. Connect OpenClaw
+
+OpenClaw can use Personal MCP as a remote **Streamable HTTP** MCP server. Give OpenClaw its own client token and ACL; do not reuse the ChatGPT token.
+
+### 9.1 Add an OpenClaw client ACL
+
+Generate a dedicated raw token on the MCP server:
+
+```bash
+openssl rand -hex 32
+```
+
+Calculate its SHA-256 digest:
+
+```bash
+printf '%s' 'PASTE_OPENCLAW_RAW_TOKEN_HERE' | sha256sum
+```
+
+Add an `openclaw` entry to `config/clients.json`. For example, to allow OpenClaw to search, read, create, and update notes only inside an OpenClaw-specific subtree:
+
+```json
+{
+  "clients": {
+    "openclaw": {
+      "token_sha256": "SHA256_OF_OPENCLAW_RAW_TOKEN",
+      "allowed_tools": [
+        "gateway_status",
+        "trilium_health_check",
+        "trilium_search_notes",
+        "trilium_get_note",
+        "trilium_create_note",
+        "trilium_update_note"
+      ],
+      "trilium": {
+        "read_roots": ["OPENCLAW_WORKSPACE_NOTE_ID"],
+        "write_roots": ["OPENCLAW_WORKSPACE_NOTE_ID"]
+      }
+    }
+  }
+}
+```
+
+If OpenClaw should be read-only, remove the create/update tools and use:
+
+```json
+"write_roots": []
+```
+
+Restart Personal MCP after changing `config/clients.json`:
+
+```bash
+docker compose restart personal-mcp
+```
+
+### 9.2 Store the raw token on the OpenClaw host
+
+Keep the raw OpenClaw token out of committed OpenClaw configuration. Store it as an environment variable available to the OpenClaw process, for example:
+
+```bash
+export PERSONAL_MCP_TOKEN='PASTE_OPENCLAW_RAW_TOKEN_HERE'
+```
+
+For a persistent deployment, place the variable in the environment mechanism used to start OpenClaw rather than committing it to a repository.
+
+### 9.3 Configure Personal MCP in OpenClaw
+
+OpenClaw-managed MCP servers live under `mcp.servers`. Add a remote Streamable HTTP server similar to:
+
+```json5
+{
+  mcp: {
+    servers: {
+      "personal-mcp": {
+        url: "https://mcp.example.com/mcp",
+        transport: "streamable-http",
+        enabled: true,
+        connectionTimeoutMs: 5000,
+        requestTimeoutMs: 20000,
+        headers: {
+          Authorization: "Bearer ${PERSONAL_MCP_TOKEN}"
+        }
+      }
+    }
+  }
+}
+```
+
+Replace `https://mcp.example.com/mcp` with your Personal MCP endpoint.
+
+You can edit this under OpenClaw **Settings -> MCP**, or manage the same `mcp.servers` configuration from the CLI.
+
+### 9.4 Verify the connection
+
+Check the saved MCP configuration:
+
+```bash
+openclaw mcp status --verbose
+```
+
+Probe the live server and list its capabilities:
+
+```bash
+openclaw mcp doctor personal-mcp --probe
+```
+
+or:
+
+```bash
+openclaw mcp probe personal-mcp
+```
+
+A successful probe should discover only the MCP tools exposed by Personal MCP. The Personal MCP ACL still provides the authoritative server-side authorization even if OpenClaw applies its own tool filters.
+
+### 9.5 Optional OpenClaw-side tool filtering
+
+You can apply a second layer of least-privilege filtering on the OpenClaw side. For example:
+
+```json5
+{
+  mcp: {
+    servers: {
+      "personal-mcp": {
+        url: "https://mcp.example.com/mcp",
+        transport: "streamable-http",
+        headers: {
+          Authorization: "Bearer ${PERSONAL_MCP_TOKEN}"
+        },
+        toolFilter: {
+          include: [
+            "gateway_status",
+            "trilium_search_notes",
+            "trilium_get_note"
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+This OpenClaw-side filter is useful for reducing which tools are presented to an agent, but it does **not** replace the per-client ACL enforced by Personal MCP.
+
+---
+
+## 10. Connect additional MCP clients
 
 For OpenClaw or another service:
 
@@ -473,7 +617,7 @@ Do not copy ChatGPT's raw token into another service.
 
 ---
 
-## 10. Audit log
+## 11. Audit log
 
 Audit events include the authenticated client identity.
 
@@ -518,7 +662,7 @@ docker compose logs -f personal-mcp
 
 ---
 
-## 11. How authorization works
+## 12. How authorization works
 
 For `MCP_AUTH_MODE=multi_bearer`, each request follows this flow:
 
@@ -554,7 +698,7 @@ A request is rejected if:
 
 ---
 
-## 12. Updating v0.4
+## 13. Updating v0.4
 
 Pull the latest code:
 
@@ -585,7 +729,7 @@ docker compose logs --tail=100 personal-mcp
 
 ---
 
-## 13. Project layout
+## 14. Project layout
 
 ```text
 personal-mcp/
@@ -612,7 +756,7 @@ personal-mcp/
 
 ---
 
-## 14. Adding another integration
+## 15. Adding another integration
 
 Add one module per backend under:
 
